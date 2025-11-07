@@ -1,0 +1,6 @@
+Test Sponsor,System Name,Base Threads/Copies,Processor - Enabled Cores,Processor - Enabled Chips,Processor - Threads/Core,Results - Base,Results - Peak,Parallel,Energy - Base,Energy - Peak
+Intel,Intel Xeon E5-2680 v4,16,14,2,2,35.2,37.8,Yes,120.5,125.8
+AMD,AMD EPYC 7742,64,64,1,2,42.1,45.3,No,180.2,195.6
+Intel,Intel Core i9-12900K,16,16,1,2,28.5,31.2,Yes,95.3,102.1
+AMD,AMD Ryzen 9 5950X,16,16,1,2,26.8,29.4,Yes,88.7,94.2
+Intel,Intel Xeon Platinum 8380,80,40,2,2,55.6,58.9,No,220.4,235.7
