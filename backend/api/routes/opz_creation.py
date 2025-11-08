@@ -13,10 +13,12 @@ import tempfile
 from docx import Document as DocxDocument
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+import json
 
 from services.database import get_db
 from services.claude_service import openrouter_service
 from services.storage_service import storage_service
+from services.knowledge_service import knowledge_service
 from models.database import OPZDocument, DeviceCategory
 from api.dependencies import get_current_user
 from loguru import logger
@@ -35,6 +37,13 @@ class OPZCreateRequest(BaseModel):
 
 class OPZRefineRequest(BaseModel):
     feedback: str
+
+
+class OPZFeedbackRequest(BaseModel):
+    opz_quality_score: int  # 1-5 rating
+    usefulness_score: int   # 1-5 rating
+    feedback_text: Optional[str] = None
+    improvement_suggestions: Optional[str] = None
 
 
 class OPZResponse(BaseModel):
@@ -117,6 +126,21 @@ async def generate_opz_task(
                 vendors=vendors,
                 template_type=template_type
             )
+
+            # Apply learning improvements to OPZ quality
+            try:
+                improved_opz_text = await knowledge_service.improve_opz_quality(
+                    requirements=configuration,
+                    category=DeviceCategory(category),
+                    current_opz=opz_text,
+                    db=None  # Will be passed in background task context
+                )
+                if improved_opz_text and improved_opz_text != opz_text:
+                    opz_text = improved_opz_text
+                    logger.info(f"Applied learning improvements to OPZ {opz_id}")
+            except Exception as improve_error:
+                logger.warning(f"Failed to apply OPZ improvements: {improve_error}")
+                # Continue with original OPZ text
             
             # Update OPZ record
             result = await db.execute(
@@ -422,3 +446,70 @@ async def delete_opz(
     logger.info(f"DEBUG: OPZ {opz_id} deletion completed successfully")
 
     return {"message": "OPZ document deleted successfully"}
+
+
+@router.post("/{opz_id}/feedback", response_model=dict)
+async def submit_opz_feedback(
+    opz_id: int,
+    feedback: OPZFeedbackRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user = Depends(get_current_user)
+):
+    """
+    Submit feedback on generated OPZ document for learning improvement
+
+    This helps improve future OPZ generation quality
+    """
+    from sqlalchemy import select
+
+    if not (1 <= feedback.opz_quality_score <= 5):
+        raise HTTPException(status_code=400, detail="OPZ quality score must be 1-5")
+
+    if not (1 <= feedback.usefulness_score <= 5):
+        raise HTTPException(status_code=400, detail="Usefulness score must be 1-5")
+
+    result = await db.execute(
+        select(OPZDocument).where(OPZDocument.id == opz_id)
+    )
+    opz_doc = result.scalar_one_or_none()
+
+    if not opz_doc:
+        raise HTTPException(status_code=404, detail="OPZ document not found")
+
+    if opz_doc.owner_id != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Store feedback in knowledge base for learning
+    try:
+        # Create knowledge entity for OPZ feedback
+        feedback_data = {
+            "opz_id": opz_id,
+            "quality_score": feedback.opz_quality_score,
+            "usefulness_score": feedback.usefulness_score,
+            "feedback_text": feedback.feedback_text,
+            "improvement_suggestions": feedback.improvement_suggestions,
+            "category": opz_doc.category.value,
+            "requirements": opz_doc.requirements,
+            "generated_text": opz_doc.generated_text[:500] if opz_doc.generated_text else None  # Truncate for storage
+        }
+
+        await knowledge_service._store_knowledge_entity(
+            entity_type="opz_feedback",
+            entity_name=f"opz_feedback_{opz_id}",
+            entity_value=json.dumps(feedback_data),
+            context=f"User feedback on OPZ document {opz_id}",
+            confidence_score=0.8,
+            db=db
+        )
+
+        learning_enabled = True
+
+    except Exception as e:
+        logger.error(f"Failed to store OPZ feedback in knowledge base: {e}")
+        learning_enabled = False
+
+    return {
+        "message": "OPZ feedback submitted successfully",
+        "opz_id": opz_id,
+        "learning_enabled": learning_enabled
+    }

@@ -7,6 +7,8 @@ import asyncio
 from typing import Optional, Dict, Any, BinaryIO, List
 from pathlib import Path
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 import PyPDF2
 import pdfplumber
@@ -26,12 +28,15 @@ from sqlalchemy import select
 
 class DocumentProcessor:
     """Process various document formats and extract text"""
-    
+
     def __init__(self):
         self.ocr_language = settings.OCR_LANGUAGE
         self.chunk_size = settings.CHUNK_SIZE
         self.chunk_overlap = settings.CHUNK_OVERLAP
         self.max_chunks = 1000000  # Allow very large documents (increased limit for big PDFs)
+        # Initialize thread pool for parallel processing
+        self.max_workers = min(multiprocessing.cpu_count(), 8)  # Limit to 8 workers max
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
     
     async def process_file(
         self,
@@ -82,6 +87,73 @@ class DocumentProcessor:
             await self._generate_and_store_embeddings(result['chunks'], document_id, db)
 
         return result
+
+    async def process_files_batch(
+        self,
+        files_data: List[Dict[str, Any]],
+        db: Optional[AsyncSession] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Process multiple files in parallel for batch operations
+
+        Args:
+            files_data: List of dicts with 'content', 'filename', 'file_type', 'document_id'
+            db: Optional database session for storing chunks
+
+        Returns:
+            List of processing results
+        """
+        logger.info(f"Starting parallel processing of {len(files_data)} files")
+
+        # Create tasks for parallel processing
+        tasks = []
+        for file_data in files_data:
+            task = self._process_single_file_task(
+                file_data['content'],
+                file_data['filename'],
+                file_data['file_type'],
+                file_data.get('document_id'),
+                db
+            )
+            tasks.append(task)
+
+        # Execute tasks with controlled concurrency
+        semaphore = asyncio.Semaphore(self.max_workers)
+        async def limited_task(task_func):
+            async with semaphore:
+                return await task_func
+
+        # Process in batches to avoid overwhelming the system
+        batch_size = self.max_workers
+        results = []
+
+        for i in range(0, len(tasks), batch_size):
+            batch_tasks = tasks[i:i + batch_size]
+            batch_results = await asyncio.gather(*[limited_task(task) for task in batch_tasks])
+            results.extend(batch_results)
+            logger.info(f"Processed batch {i//batch_size + 1} of {(len(tasks) + batch_size - 1)//batch_size}")
+
+        logger.info(f"Completed parallel processing of {len(files_data)} files")
+        return results
+
+    async def _process_single_file_task(
+        self,
+        file_content: bytes,
+        filename: str,
+        file_type: str,
+        document_id: Optional[int],
+        db: Optional[AsyncSession]
+    ) -> Dict[str, Any]:
+        """Task wrapper for processing a single file"""
+        try:
+            return await self.process_file(file_content, filename, file_type, document_id, db)
+        except Exception as e:
+            logger.error(f"Error processing file {filename}: {e}")
+            return {
+                'text': f"Error processing file: {str(e)}",
+                'metadata': {'filename': filename, 'file_type': file_type, 'error': str(e)},
+                'chunks': []
+            }
         
     
     async def _process_pdf(self, file_content: bytes, filename: str) -> Dict[str, Any]:
@@ -403,8 +475,8 @@ class DocumentProcessor:
                 logger.info(f"Using batch processing with batch size {batch_size}")
                 embeddings = await vector_search_service.batch_generate_embeddings(chunks, batch_size)
 
-                for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-                    await self._store_single_chunk(db, document_id, chunk, embedding, i)
+                # Store chunks in parallel batches
+                await self._store_chunks_batch(db, document_id, chunks, embeddings)
 
             else:
                 # Process chunks individually (fallback or for single chunks)
@@ -419,6 +491,41 @@ class DocumentProcessor:
             logger.error(f"Error generating and storing embeddings for document {document_id}: {e}")
             await db.rollback()
             raise
+
+    async def _store_chunks_batch(
+        self,
+        db: AsyncSession,
+        document_id: int,
+        chunks: List[str],
+        embeddings: List[List[float]]
+    ) -> None:
+        """
+        Store multiple chunks with their embeddings in batch
+
+        Args:
+            db: Database session
+            document_id: Document ID
+            chunks: List of text chunks
+            embeddings: List of embedding vectors
+        """
+        chunk_records = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            chunk_record = DocumentChunk(
+                document_id=document_id,
+                content=chunk,
+                chunk_index=i,
+                chunk_type="paragraph",  # Default type, could be enhanced to detect headers/tables
+                embedding=embedding,
+                chunk_metadata={
+                    "chunk_length": len(chunk),
+                    "start_position": i * (self.chunk_size - self.chunk_overlap)
+                }
+            )
+            chunk_records.append(chunk_record)
+
+        # Bulk insert for better performance
+        db.add_all(chunk_records)
+        logger.info(f"Bulk stored {len(chunk_records)} chunks for document {document_id}")
 
     async def _store_single_chunk(
         self,

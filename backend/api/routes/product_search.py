@@ -10,9 +10,12 @@ import json
 from services.database import get_db
 from services.claude_service import openrouter_service
 from services.vector_search_service import vector_search_service
+from services.cache_service import cache_service
+from services.knowledge_service import knowledge_service
 from models.database import Product, DeviceCategory, Benchmark, SearchHistory
 from api.dependencies import get_current_user
 from loguru import logger
+import hashlib
 
 
 router = APIRouter()
@@ -45,6 +48,12 @@ class SearchResponse(BaseModel):
     questions_for_customer: List[str]
     general_analysis: str
     search_id: int
+
+
+class FeedbackRequest(BaseModel):
+    selected_product_id: int
+    feedback_score: int  # 1-5 rating
+    additional_feedback: Optional[str] = None
 
 
 class AdvancedSearchRequest(BaseModel):
@@ -99,20 +108,36 @@ async def search_products(
     current_user = Depends(get_current_user)
 ):
     """
-    Search for products matching OPZ requirements
+    Search for products matching OPZ requirements with Redis caching
 
     This endpoint supports both traditional Claude-based matching and new vector similarity search:
     - Vector search: Multi-stage retrieval (embedding → vector search → reranking → response)
     - Traditional search: Claude analysis with benchmark data (backward compatibility)
 
-    The search method is determined by the use_vector_search parameter.
+    Results are cached in Redis for 5 minutes to improve performance.
     """
+    # Generate cache key from search parameters
+    cache_key = _generate_search_cache_key(search_request)
+
+    # Try to get cached results first
+    cached_result = await cache_service.get_cached_product_search(cache_key)
+    if cached_result:
+        logger.info(f"Returning cached search results for key: {cache_key}")
+        return SearchResponse(**cached_result)
+
+    # No cache hit, perform search
     if search_request.use_vector_search:
         # Use new vector similarity search
-        return await _vector_search_products(search_request, db)
+        result = await _vector_search_products(search_request, db)
     else:
         # Use traditional Claude-based search for backward compatibility
-        return await _traditional_search_products(search_request, db)
+        result = await _traditional_search_products(search_request, db)
+
+    # Cache the results
+    await cache_service.cache_product_search(cache_key, result.dict(), ttl_seconds=300)  # 5 minutes
+    logger.info(f"Cached search results for key: {cache_key}")
+
+    return result
 
 
 async def _vector_search_products(
@@ -192,6 +217,14 @@ async def _vector_search_products(
         await db.commit()
         await db.refresh(search_history)
 
+        # Apply learning improvements to results
+        improved_results = await knowledge_service.improve_search_accuracy(
+            search_request.requirements_text,
+            search_request.category,
+            matched_products,
+            db
+        )
+
         # Extract questions_for_customer as list of strings
         questions_for_customer = []
         raw_questions = analysis_result.get('questions_for_customer', [])
@@ -211,10 +244,10 @@ async def _vector_search_products(
                     questions_for_customer.append(str(q))
 
         return SearchResponse(
-            matched_products=matched_products,
+            matched_products=improved_results if improved_results else matched_products,
             questions_for_customer=questions_for_customer,
             general_analysis=analysis_result.get('general_analysis',
-                f'Vector search found {len(matched_products)} matching products.'),
+                f'Enhanced search found {len(improved_results) if improved_results else len(matched_products)} matching products with learning improvements.'),
             search_id=search_history.id
         )
 
@@ -516,10 +549,14 @@ async def get_product_details(
     db: AsyncSession = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
-    """Get detailed product information"""
-    from sqlalchemy import select
-
+    """Get detailed product information with Redis caching"""
     logger.info(f"Fetching product details for product_id: {product_id}")
+
+    # Try cache first
+    cached_details = await cache_service.get_cached_product_details(product_id)
+    if cached_details:
+        logger.info(f"Returning cached product details for product_id: {product_id}")
+        return cached_details
 
     try:
         # Load product data
@@ -574,9 +611,7 @@ async def get_product_details(
             for doc in documents
         ]
 
-        logger.info(f"Returning product details for: {product_row.name}")
-
-        return {
+        product_details = {
             "id": product_row.id,
             "vendor": vendor_name,
             "name": product_row.name,
@@ -589,6 +624,14 @@ async def get_product_details(
             "created_at": product_row.created_at,
             "updated_at": product_row.updated_at
         }
+
+        # Cache the result
+        await cache_service.cache_product_details(product_id, product_details, ttl_seconds=600)  # 10 minutes
+        logger.info(f"Cached product details for product_id: {product_id}")
+
+        logger.info(f"Returning product details for: {product_row.name}")
+        return product_details
+
     except Exception as e:
         logger.error(f"Error in get_product_details: {e}")
         raise
@@ -597,37 +640,47 @@ async def get_product_details(
 @router.post("/search/{search_id}/feedback", response_model=dict)
 async def submit_search_feedback(
     search_id: int,
-    selected_product_id: int,
-    feedback_score: int,
+    feedback: FeedbackRequest,
     db: AsyncSession = Depends(get_db),
     current_user = Depends(get_current_user)
 ):
     """
-    Submit feedback on search results
-    
-    This helps improve future searches
+    Submit feedback on search results with knowledge learning
+
+    This helps improve future searches through machine learning
     """
     from sqlalchemy import select
-    
-    if not 1 <= feedback_score <= 5:
+
+    if not 1 <= feedback.feedback_score <= 5:
         raise HTTPException(status_code=400, detail="Feedback score must be 1-5")
-    
+
     result = await db.execute(
         select(SearchHistory).where(SearchHistory.id == search_id)
     )
     search = result.scalar_one_or_none()
-    
+
     if not search:
         raise HTTPException(status_code=404, detail="Search not found")
-    
-    search.selected_product_id = selected_product_id
-    search.feedback_score = feedback_score
-    
-    await db.commit()
-    
+
+    # Store feedback using knowledge service for learning
+    success = await knowledge_service.store_user_feedback(
+        search_id=search_id,
+        selected_product_id=feedback.selected_product_id,
+        feedback_score=feedback.feedback_score,
+        additional_feedback=feedback.additional_feedback,
+        db=db
+    )
+
+    if not success:
+        # Fallback to basic storage if knowledge service fails
+        search.selected_product_id = feedback.selected_product_id
+        search.feedback_score = feedback.feedback_score
+        await db.commit()
+
     return {
-        "message": "Feedback submitted successfully",
-        "search_id": search_id
+        "message": "Feedback submitted successfully and learning patterns updated",
+        "search_id": search_id,
+        "learning_enabled": success
     }
 
 
@@ -774,13 +827,14 @@ async def validate_specifications(
     current_user = Depends(get_current_user)
 ):
     """
-    Validate product specifications against standards and requirements
+    Validate and normalize product specifications using knowledge base
 
     Performs comprehensive validation including:
-    - Format validation
-    - Range checking
+    - Format validation with learning
+    - Range checking against historical data
     - Compliance verification
-    - Cross-reference validation
+    - Cross-reference validation with similar products
+    - Specification normalization using learned patterns
     """
     try:
         validation_errors = []
@@ -802,14 +856,23 @@ async def validate_specifications(
             if field not in validation_request.specifications:
                 validation_errors.append(f"Missing required field: {field}")
 
-        # Validate and normalize specifications
-        for key, value in validation_request.specifications.items():
-            try:
-                normalized_value, warnings = await _validate_specification_field(key, value, validation_request.category)
-                normalized_specs[key] = normalized_value
-                validation_warnings.extend(warnings)
-            except ValueError as e:
-                validation_errors.append(f"Invalid {key}: {str(e)}")
+        # Use knowledge service for normalization
+        try:
+            normalized_specs = await knowledge_service.normalize_specifications(
+                validation_request.specifications,
+                validation_request.category,
+                db
+            )
+        except Exception as norm_error:
+            logger.warning(f"Knowledge-based normalization failed, using basic validation: {norm_error}")
+            # Fallback to basic validation
+            for key, value in validation_request.specifications.items():
+                try:
+                    normalized_value, warnings = await _validate_specification_field(key, value, validation_request.category)
+                    normalized_specs[key] = normalized_value
+                    validation_warnings.extend(warnings)
+                except ValueError as e:
+                    validation_errors.append(f"Invalid {key}: {str(e)}")
 
         # Cross-reference validation
         cross_validation_errors = await _cross_validate_specifications(
@@ -983,6 +1046,29 @@ async def _check_compatibility(result: Dict[str, Any], requirements: Dict[str, A
     """Check product compatibility"""
     # Placeholder for compatibility checking logic
     return True
+
+
+def _generate_search_cache_key(search_request: ProductSearchRequest) -> str:
+    """
+    Generate a cache key for search requests
+
+    Args:
+        search_request: The search request object
+
+    Returns:
+        str: Cache key hash
+    """
+    # Create a deterministic string from search parameters
+    key_components = [
+        search_request.requirements_text,
+        str(search_request.category) if search_request.category else "",
+        str(search_request.vendor_filter) if search_request.vendor_filter else "",
+        str(search_request.min_match_score),
+        str(search_request.use_vector_search)
+    ]
+
+    key_string = "|".join(key_components)
+    return hashlib.sha256(key_string.encode()).hexdigest()
 
 
 @router.get("/benchmarks/search", response_model=List[dict])

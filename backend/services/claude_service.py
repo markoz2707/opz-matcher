@@ -5,6 +5,9 @@ import httpx
 from typing import List, Dict, Any, Optional
 from loguru import logger
 import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 
 from config.settings import settings
 from typing import Dict, List, Optional, Any
@@ -224,6 +227,10 @@ class OpenRouterService:
 
         # Always set max_tokens for both modes
         self.max_tokens = settings.MAX_TOKENS
+
+        # Initialize thread pool for concurrent API calls
+        self.max_workers = min(multiprocessing.cpu_count(), 4)  # Limit concurrent API calls
+        self.executor = ThreadPoolExecutor(max_workers=self.max_workers)
     
     async def extract_product_specifications(
         self,
@@ -256,6 +263,54 @@ class OpenRouterService:
         return await self._extract_specifications_single(
             document_text, document_type, vendor_name, product_name, validate_specs
         )
+
+    async def extract_specifications_batch(
+        self,
+        documents_data: List[Dict[str, Any]],
+        validate_specs: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract specifications from multiple documents concurrently
+
+        Args:
+            documents_data: List of dicts with 'text', 'document_type', 'vendor_name', 'product_name'
+            validate_specs: Whether to validate extracted specifications
+
+        Returns:
+            List of extraction results
+        """
+        logger.info(f"Starting concurrent specification extraction for {len(documents_data)} documents")
+
+        # Create tasks for concurrent processing
+        tasks = []
+        for doc_data in documents_data:
+            task = self.extract_product_specifications(
+                document_text=doc_data['text'],
+                document_type=doc_data.get('document_type', 'datasheet'),
+                vendor_name=doc_data.get('vendor_name'),
+                product_name=doc_data.get('product_name'),
+                validate_specs=validate_specs
+            )
+            tasks.append(task)
+
+        # Execute with controlled concurrency to avoid API rate limits
+        semaphore = asyncio.Semaphore(self.max_workers)
+        async def limited_task(task_func):
+            async with semaphore:
+                return await task_func
+
+        # Process in batches to manage API load
+        batch_size = self.max_workers
+        results = []
+
+        for i in range(0, len(tasks), batch_size):
+            batch_tasks = tasks[i:i + batch_size]
+            batch_results = await asyncio.gather(*[limited_task(task) for task in batch_tasks])
+            results.extend(batch_results)
+            logger.info(f"Processed specification extraction batch {i//batch_size + 1}")
+
+        logger.info(f"Completed concurrent specification extraction for {len(documents_data)} documents")
+        return results
 
     async def _extract_specifications_single(
         self,
@@ -848,6 +903,43 @@ Format the document professionally with clear sections and numbering."""
                 return await self.generate_embedding(text)
             # Return zero vector as last resort
             return [0.0] * 1536
+
+    async def generate_embeddings_batch(
+        self,
+        texts: List[str]
+    ) -> List[List[float]]:
+        """
+        Generate embeddings for multiple texts concurrently
+
+        Args:
+            texts: List of text strings to embed
+
+        Returns:
+            List of embedding vectors
+        """
+        logger.info(f"Starting batch embedding generation for {len(texts)} texts")
+
+        # Create tasks for concurrent embedding generation
+        tasks = [self.generate_embedding(text) for text in texts]
+
+        # Execute with controlled concurrency
+        semaphore = asyncio.Semaphore(self.max_workers)
+        async def limited_task(task_func):
+            async with semaphore:
+                return await task_func
+
+        # Process in batches to manage API load
+        batch_size = self.max_workers * 2  # Allow more concurrent embedding calls
+        results = []
+
+        for i in range(0, len(tasks), batch_size):
+            batch_tasks = tasks[i:i + batch_size]
+            batch_results = await asyncio.gather(*[limited_task(task) for task in batch_tasks])
+            results.extend(batch_results)
+            logger.info(f"Processed embedding batch {i//batch_size + 1}")
+
+        logger.info(f"Completed batch embedding generation for {len(texts)} texts")
+        return results
 
     async def refine_opz(
         self,

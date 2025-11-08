@@ -428,6 +428,9 @@ async def upload_documents(
                 product.id,
                 processing_options
             )
+        
+            # For batch uploads, we could implement parallel processing here
+            # but keeping synchronous for now to maintain compatibility
 
             if processing_result["success"]:
                 # Update document with successful processing results
@@ -516,9 +519,13 @@ async def batch_upload_documents(
     processed_count = 0
     failed_count = len(invalid_files)
 
-    # Process valid files
-    for file in valid_files:
-        try:
+    # Process valid files in parallel batches
+    if valid_files:
+        # Prepare file data for parallel processing
+        files_data = []
+        document_records = []
+
+        for file in valid_files:
             file_ext = file.filename.split('.')[-1].lower()
             file_content = await file.read()
 
@@ -544,67 +551,64 @@ async def batch_upload_documents(
             )
 
             db.add(document)
-            await db.commit()
-            await db.refresh(document)
+            document_records.append(document)
+            files_data.append({
+                'content': file_content,
+                'filename': file.filename,
+                'file_type': file_ext,
+                'document_id': None  # Will be set after commit
+            })
 
-            # Process document in background with enhanced options
-            processing_options = request.processing_options or {}
+        await db.commit()
 
-            # Process document synchronously to avoid threading issues
-            processing_result = await process_document_with_validation(
-                document.id,
-                file_content,
-                file.filename,
-                file_ext,
-                request.product_id,
-                processing_options
-            )
+        # Set document IDs
+        for doc, file_data in zip(document_records, files_data):
+            await db.refresh(doc)
+            file_data['document_id'] = doc.id
 
-            if processing_result["success"]:
-                # Update document with successful processing results
-                document.extracted_text = processing_result["extracted_text"]
-                document.extracted_specs = processing_result["extracted_specs"]
-                document.is_processed = True
-                document.processed_at = datetime.utcnow()
+        # Process documents in parallel using the new batch method
+        logger.info(f"Processing {len(files_data)} documents in parallel")
+        processing_results = await document_processor.process_files_batch(files_data, db)
+
+        # Update documents with results
+        for doc, result in zip(document_records, processing_results):
+            if result.get("success", False):
+                doc.extracted_text = result.get("extracted_text")
+                doc.extracted_specs = result.get("extracted_specs")
+                doc.is_processed = True
+                doc.processed_at = datetime.utcnow()
 
                 # Update product specifications
-                if processing_result["extracted_specs"] and 'specifications' in processing_result["extracted_specs"]:
+                if result.get("extracted_specs") and 'specifications' in result["extracted_specs"]:
                     product.specifications = {
                         **product.specifications,
-                        **processing_result["extracted_specs"]['specifications']
+                        **result["extracted_specs"]['specifications']
                     }
 
                 # Generate embeddings if requested
-                if processing_options.get("generate_embeddings", True):
-                    await generate_product_embeddings(request.product_id, processing_result["extracted_specs"], db)
+                if request.processing_options and request.processing_options.get("generate_embeddings", True):
+                    await generate_product_embeddings(request.product_id, result["extracted_specs"], db)
 
-                await db.commit()
-                logger.info(f"Document {document.id} batch processing completed successfully")
+                results.append(DocumentUploadResponse(
+                    document_id=doc.id,
+                    filename=doc.filename,
+                    status="success",
+                    message="Document processed successfully"
+                ))
+                processed_count += 1
             else:
-                # Update document with error
-                document.processing_error = processing_result["error"]
-                document.is_processed = False
-                await db.commit()
-                logger.error(f"Document {document.id} batch processing failed: {processing_result['error']}")
+                doc.processing_error = result.get("error", "Unknown error")
+                doc.is_processed = False
+                results.append(DocumentUploadResponse(
+                    document_id=doc.id,
+                    filename=doc.filename,
+                    status="error",
+                    message=f"Processing failed: {result.get('error', 'Unknown error')}"
+                ))
+                failed_count += 1
 
-            results.append(DocumentUploadResponse(
-                document_id=document.id,
-                filename=file.filename,
-                status="processing",
-                message="Document queued for batch processing"
-            ))
-
-            processed_count += 1
-
-        except Exception as e:
-            logger.error(f"Error in batch upload for {file.filename}: {e}")
-            results.append(DocumentUploadResponse(
-                document_id=0,
-                filename=file.filename,
-                status="error",
-                message=f"Batch upload failed: {str(e)}"
-            ))
-            failed_count += 1
+        await db.commit()
+        logger.info(f"Batch processing completed: {processed_count} successful, {failed_count} failed")
 
     # Add error responses for invalid files
     for file in invalid_files:
@@ -627,7 +631,7 @@ async def batch_upload_documents(
 
 async def generate_product_embeddings(product_id: int, specs: dict, db):
     """
-    Generate and store embeddings for product specifications and features
+    Generate and store embeddings for product specifications and features using batch processing
 
     Args:
         product_id: Product ID to associate embeddings with
@@ -635,56 +639,48 @@ async def generate_product_embeddings(product_id: int, specs: dict, db):
         db: Database session
     """
     try:
-        logger.info(f"Generating embeddings for product {product_id}")
+        logger.info(f"Generating batch embeddings for product {product_id}")
+
+        # Prepare texts for batch embedding generation
+        texts_to_embed = []
+        embedding_types = []
 
         # Generate embedding for product specifications
         if specs and 'specifications' in specs:
             specs_text = json.dumps(specs['specifications'], indent=2)
-            specs_embedding = await openrouter_service.generate_embedding(specs_text)
-
-            # Create ProductEmbedding record for specifications
-            specs_embedding_record = ProductEmbedding(
-                product_id=product_id,
-                content=specs_text,
-                content_type="specifications",
-                embedding=specs_embedding
-            )
-            db.add(specs_embedding_record)
-            logger.info(f"Created specifications embedding for product {product_id}")
+            texts_to_embed.append(specs_text)
+            embedding_types.append("specifications")
 
         # Generate embedding for product description if available
         if specs and 'description' in specs and specs['description']:
-            desc_embedding = await openrouter_service.generate_embedding(specs['description'])
-
-            # Create ProductEmbedding record for description
-            desc_embedding_record = ProductEmbedding(
-                product_id=product_id,
-                content=specs['description'],
-                content_type="description",
-                embedding=desc_embedding
-            )
-            db.add(desc_embedding_record)
-            logger.info(f"Created description embedding for product {product_id}")
+            texts_to_embed.append(specs['description'])
+            embedding_types.append("description")
 
         # Generate embeddings for key features if available
         if specs and 'features' in specs and specs['features']:
             features_text = "\n".join(specs['features'])
-            features_embedding = await openrouter_service.generate_embedding(features_text)
+            texts_to_embed.append(features_text)
+            embedding_types.append("features")
 
-            # Create ProductEmbedding record for features
-            features_embedding_record = ProductEmbedding(
-                product_id=product_id,
-                content=features_text,
-                content_type="features",
-                embedding=features_embedding
-            )
-            db.add(features_embedding_record)
-            logger.info(f"Created features embedding for product {product_id}")
+        # Generate embeddings in batch if we have texts
+        if texts_to_embed:
+            embeddings = await openrouter_service.generate_embeddings_batch(texts_to_embed)
 
-        logger.info(f"Successfully generated embeddings for product {product_id}")
+            # Create embedding records
+            for text, embedding, emb_type in zip(texts_to_embed, embeddings, embedding_types):
+                embedding_record = ProductEmbedding(
+                    product_id=product_id,
+                    content=text,
+                    content_type=emb_type,
+                    embedding=embedding
+                )
+                db.add(embedding_record)
+                logger.info(f"Created {emb_type} embedding for product {product_id}")
+
+        logger.info(f"Successfully generated batch embeddings for product {product_id}")
 
     except Exception as e:
-        logger.error(f"Error generating embeddings for product {product_id}: {e}")
+        logger.error(f"Error generating batch embeddings for product {product_id}: {e}")
         # Don't raise exception - embedding generation failure shouldn't block document processing
         # The error is logged but processing continues
 
