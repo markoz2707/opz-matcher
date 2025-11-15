@@ -21,11 +21,26 @@ import {
   Chip,
   IconButton,
   LinearProgress,
+  FormControl,
+  InputLabel,
+  Select,
+  MenuItem as MuiMenuItem,
 } from '@mui/material';
-import { AddOutlined, UploadFileOutlined, RefreshOutlined, DeleteOutlined, EditOutlined } from '@mui/icons-material';
+import {
+  AddOutlined,
+  UploadFileOutlined,
+  RefreshOutlined,
+  DeleteOutlined,
+  EditOutlined,
+  BusinessOutlined,
+  TrendingUpOutlined,
+  StorageOutlined,
+} from '@mui/icons-material';
 import { useDropzone } from 'react-dropzone';
 import { useSnackbar } from 'notistack';
 import Layout from '../components/Layout';
+import ConfirmDialog from '../components/ConfirmDialog';
+import EmptyState from '../components/EmptyState';
 import { apiClient } from '../services/api';
 
 interface TabPanelProps {
@@ -48,6 +63,14 @@ export default function DataImport() {
   const [products, setProducts] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const { enqueueSnackbar } = useSnackbar();
+
+  // Confirm Dialog State
+  const [confirmDialog, setConfirmDialog] = useState({
+    open: false,
+    title: '',
+    message: '',
+    onConfirm: () => {},
+  });
 
   useEffect(() => {
     loadVendors();
@@ -136,10 +159,8 @@ export default function DataImport() {
     try {
       const data = await apiClient.getProducts();
       setProducts(data);
-      console.log('Loaded products:', data);
     } catch (error) {
       enqueueSnackbar('Failed to load products', { variant: 'error' });
-      console.error('Error loading products:', error);
     }
   };
 
@@ -240,7 +261,7 @@ export default function DataImport() {
 
       // Show additional feedback if there were warnings or errors
       if (result.errors && result.errors.length > 0) {
-        enqueueSnackbar(`Import completed with ${result.errors.length} errors. Check console for details.`, { variant: 'warning' });
+        enqueueSnackbar(`Import completed with ${result.errors.length} errors.`, { variant: 'warning' });
       }
       if (result.warnings && result.warnings.length > 0) {
         enqueueSnackbar(`Import completed with ${result.warnings.length} warnings.`, { variant: 'info' });
@@ -253,9 +274,6 @@ export default function DataImport() {
     } catch (error: any) {
       const errorMessage = error.response?.data?.detail || error.response?.data?.message || 'Failed to import benchmarks';
       enqueueSnackbar(errorMessage, { variant: 'error' });
-
-      // Log detailed error for debugging
-      console.error('Benchmark import error:', error.response?.data);
     }
   };
 
@@ -433,41 +451,61 @@ export default function DataImport() {
                   </TableRow>
                 </TableHead>
               <TableBody>
-                {vendors.map((vendor) => (
-                  <TableRow key={vendor.id}>
-                    <TableCell>{vendor.name}</TableCell>
-                    <TableCell>{vendor.full_name || '-'}</TableCell>
-                    <TableCell>{vendor.website || '-'}</TableCell>
-                    <TableCell>{vendor.product_count || 0}</TableCell>
-                    <TableCell>
-                      <Box sx={{ display: 'flex', gap: 1 }}>
-                        <IconButton
-                          color="primary"
-                          onClick={() => openEditVendorDialog(vendor)}
-                        >
-                          <EditOutlined />
-                        </IconButton>
-                        <IconButton
-                          color="error"
-                          onClick={async () => {
-                            if (window.confirm(`Are you sure you want to delete vendor "${vendor.name}"?`)) {
-                              try {
-                                await apiClient.deleteVendor(vendor.id);
-                                enqueueSnackbar('Vendor deleted successfully', { variant: 'success' });
-                                loadVendors();
-                                loadProducts(); // Refresh products as well since vendor deletion might affect them
-                              } catch (error: any) {
-                                enqueueSnackbar(error.response?.data?.detail || 'Failed to delete vendor', { variant: 'error' });
-                              }
-                            }
-                          }}
-                        >
-                          <DeleteOutlined />
-                        </IconButton>
-                      </Box>
+                {vendors.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={5}>
+                      <EmptyState
+                        icon={<BusinessOutlined sx={{ fontSize: 60 }} />}
+                        title="No Vendors Yet"
+                        description="Start by adding vendors who manufacture the products you want to track. Click the 'Add Vendor' button above to get started."
+                        actionLabel="Add Your First Vendor"
+                        onAction={() => setVendorDialogOpen(true)}
+                      />
                     </TableCell>
                   </TableRow>
-                ))}
+                ) : (
+                  vendors.map((vendor) => (
+                    <TableRow key={vendor.id}>
+                      <TableCell>{vendor.name}</TableCell>
+                      <TableCell>{vendor.full_name || '-'}</TableCell>
+                      <TableCell>{vendor.website || '-'}</TableCell>
+                      <TableCell>{vendor.product_count || 0}</TableCell>
+                      <TableCell>
+                        <Box sx={{ display: 'flex', gap: 1 }}>
+                          <IconButton
+                            color="primary"
+                            onClick={() => openEditVendorDialog(vendor)}
+                          >
+                            <EditOutlined />
+                          </IconButton>
+                          <IconButton
+                            color="error"
+                            onClick={() => {
+                              setConfirmDialog({
+                                open: true,
+                                title: 'Delete Vendor',
+                                message: `Are you sure you want to delete vendor "${vendor.name}"? This action cannot be undone.`,
+                                onConfirm: async () => {
+                                  setConfirmDialog({ ...confirmDialog, open: false });
+                                  try {
+                                    await apiClient.deleteVendor(vendor.id);
+                                    enqueueSnackbar('Vendor deleted successfully', { variant: 'success' });
+                                    loadVendors();
+                                    loadProducts();
+                                  } catch (error: any) {
+                                    enqueueSnackbar(error.response?.data?.detail || 'Failed to delete vendor', { variant: 'error' });
+                                  }
+                                },
+                              });
+                            }}
+                          >
+                            <DeleteOutlined />
+                          </IconButton>
+                        </Box>
+                      </TableCell>
+                    </TableRow>
+                  ))
+                )}
               </TableBody>
             </Table>
           </TableContainer>
@@ -506,53 +544,73 @@ export default function DataImport() {
                   </TableRow>
                 </TableHead>
                 <TableBody>
-                  {products.map((product) => (
-                    <TableRow key={product.id}>
-                      <TableCell>{product.name}</TableCell>
-                      <TableCell>{product.vendor}</TableCell>
-                      <TableCell>{product.model || '-'}</TableCell>
-                      <TableCell>
-                        <Chip label={product.category} size="small" />
-                      </TableCell>
-                      <TableCell>
-                        <Box sx={{ display: 'flex', gap: 1 }}>
-                          <IconButton
-                            color="primary"
-                            onClick={() => openEditProductDialog(product)}
-                          >
-                            <EditOutlined />
-                          </IconButton>
-                          <Button
-                            size="small"
-                            onClick={() => {
-                              setSelectedProduct(product.id);
-                              setUploadDialogOpen(true);
-                            }}
-                          >
-                            Upload Docs
-                          </Button>
-                          <IconButton
-                            color="error"
-                            size="small"
-                            onClick={async () => {
-                              if (window.confirm(`Are you sure you want to delete product "${product.name}"? This will also delete all associated documents.`)) {
-                                try {
-                                  await apiClient.deleteProduct(product.id);
-                                  enqueueSnackbar('Product deleted successfully', { variant: 'success' });
-                                  loadVendors();
-                                  loadProducts();
-                                } catch (error: any) {
-                                  enqueueSnackbar(error.response?.data?.detail || 'Failed to delete product', { variant: 'error' });
-                                }
-                              }
-                            }}
-                          >
-                            <DeleteOutlined />
-                          </IconButton>
-                        </Box>
+                  {products.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5}>
+                        <EmptyState
+                          icon={<TrendingUpOutlined sx={{ fontSize: 60 }} />}
+                          title="No Products Yet"
+                          description="Add products to your catalog so you can upload their datasheets and match them against OPZ requirements. Make sure to add vendors first."
+                          actionLabel={vendors.length > 0 ? "Add Your First Product" : undefined}
+                          onAction={vendors.length > 0 ? () => setProductDialogOpen(true) : undefined}
+                        />
                       </TableCell>
                     </TableRow>
-                  ))}
+                  ) : (
+                    products.map((product) => (
+                      <TableRow key={product.id}>
+                        <TableCell>{product.name}</TableCell>
+                        <TableCell>{product.vendor}</TableCell>
+                        <TableCell>{product.model || '-'}</TableCell>
+                        <TableCell>
+                          <Chip label={product.category} size="small" />
+                        </TableCell>
+                        <TableCell>
+                          <Box sx={{ display: 'flex', gap: 1 }}>
+                            <IconButton
+                              color="primary"
+                              onClick={() => openEditProductDialog(product)}
+                            >
+                              <EditOutlined />
+                            </IconButton>
+                            <Button
+                              size="small"
+                              onClick={() => {
+                                setSelectedProduct(product.id);
+                                setUploadDialogOpen(true);
+                              }}
+                            >
+                              Upload Docs
+                            </Button>
+                            <IconButton
+                              color="error"
+                              size="small"
+                              onClick={() => {
+                                setConfirmDialog({
+                                  open: true,
+                                  title: 'Delete Product',
+                                  message: `Are you sure you want to delete product "${product.name}"? This will also delete all associated documents. This action cannot be undone.`,
+                                  onConfirm: async () => {
+                                    setConfirmDialog({ ...confirmDialog, open: false });
+                                    try {
+                                      await apiClient.deleteProduct(product.id);
+                                      enqueueSnackbar('Product deleted successfully', { variant: 'success' });
+                                      loadVendors();
+                                      loadProducts();
+                                    } catch (error: any) {
+                                      enqueueSnackbar(error.response?.data?.detail || 'Failed to delete product', { variant: 'error' });
+                                    }
+                                  },
+                                });
+                              }}
+                            >
+                              <DeleteOutlined />
+                            </IconButton>
+                          </Box>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
                 </TableBody>
               </Table>
             </TableContainer>
@@ -617,18 +675,23 @@ export default function DataImport() {
                         <TableCell>
                           <IconButton
                             color="error"
-                            onClick={async () => {
-                              if (window.confirm(`Are you sure you want to delete "${doc.filename}"?`)) {
-                                try {
-                                  await apiClient.deleteDocument(doc.id);
-                                  enqueueSnackbar('Document deleted successfully', { variant: 'success' });
-                                  // Refresh data
-                                  loadVendors();
-                                  loadProducts();
-                                } catch (error: any) {
-                                  enqueueSnackbar(error.response?.data?.detail || 'Failed to delete document', { variant: 'error' });
-                                }
-                              }
+                            onClick={() => {
+                              setConfirmDialog({
+                                open: true,
+                                title: 'Delete Document',
+                                message: `Are you sure you want to delete "${doc.filename}"? This action cannot be undone.`,
+                                onConfirm: async () => {
+                                  setConfirmDialog({ ...confirmDialog, open: false });
+                                  try {
+                                    await apiClient.deleteDocument(doc.id);
+                                    enqueueSnackbar('Document deleted successfully', { variant: 'success' });
+                                    loadVendors();
+                                    loadProducts();
+                                  } catch (error: any) {
+                                    enqueueSnackbar(error.response?.data?.detail || 'Failed to delete document', { variant: 'error' });
+                                  }
+                                },
+                              });
                             }}
                           >
                             <DeleteOutlined />
@@ -637,12 +700,16 @@ export default function DataImport() {
                       </TableRow>
                     ))
                   )}
-                  {products.length === 0 && (
+                  {products.flatMap((p) => p.documents || []).length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={7} align="center">
-                        <Typography variant="body2" color="text.secondary">
-                          No documents found. Upload documents for products first.
-                        </Typography>
+                      <TableCell colSpan={7}>
+                        <EmptyState
+                          icon={<StorageOutlined sx={{ fontSize: 60 }} />}
+                          title="No Documents Uploaded"
+                          description="Upload product datasheets, manuals, and technical documentation to enable AI-powered product matching. Documents will be automatically processed and analyzed."
+                          actionLabel={products.length > 0 ? "Upload Documents" : undefined}
+                          onAction={products.length > 0 ? () => setUploadDialogOpen(true) : undefined}
+                        />
                       </TableCell>
                     </TableRow>
                   )}
@@ -920,6 +987,26 @@ export default function DataImport() {
         <Dialog open={uploadDialogOpen} onClose={() => !loading && setUploadDialogOpen(false)} maxWidth="md" fullWidth>
           <DialogTitle>Upload Documents</DialogTitle>
           <DialogContent>
+            {!uploadProgress && (
+              <FormControl fullWidth sx={{ mb: 2, mt: 1 }}>
+                <InputLabel>Select Product</InputLabel>
+                <Select
+                  value={selectedProduct || ''}
+                  onChange={(e) => setSelectedProduct(e.target.value as number)}
+                  label="Select Product"
+                >
+                  <MuiMenuItem value="">
+                    <em>Choose a product</em>
+                  </MuiMenuItem>
+                  {products.map((product) => (
+                    <MuiMenuItem key={product.id} value={product.id}>
+                      {product.vendor} - {product.name} {product.model && `(${product.model})`}
+                    </MuiMenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+            )}
+
             {uploadProgress && (
               <Box sx={{ mb: 3 }}>
                 <Typography variant="body2" color="text.secondary" gutterBottom>
@@ -983,14 +1070,29 @@ export default function DataImport() {
             )}
           </DialogContent>
           <DialogActions>
-            <Button onClick={() => setUploadDialogOpen(false)} disabled={loading}>
+            <Button onClick={() => {
+              setUploadDialogOpen(false);
+              setUploadedFiles([]);
+              setSelectedProduct(null);
+            }} disabled={loading}>
               Cancel
             </Button>
-            <Button onClick={handleUpload} variant="contained" disabled={loading || uploadedFiles.length === 0}>
+            <Button onClick={handleUpload} variant="contained" disabled={loading || uploadedFiles.length === 0 || !selectedProduct}>
               {loading ? 'Processing...' : `Upload ${uploadedFiles.length} File${uploadedFiles.length !== 1 ? 's' : ''}`}
             </Button>
           </DialogActions>
         </Dialog>
+
+        {/* Confirm Dialog */}
+        <ConfirmDialog
+          open={confirmDialog.open}
+          title={confirmDialog.title}
+          message={confirmDialog.message}
+          onConfirm={confirmDialog.onConfirm}
+          onCancel={() => setConfirmDialog({ ...confirmDialog, open: false })}
+          confirmColor="error"
+          confirmText="Delete"
+        />
       </Box>
     </Layout>
   );

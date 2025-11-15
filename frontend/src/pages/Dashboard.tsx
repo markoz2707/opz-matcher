@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Grid,
@@ -8,19 +9,46 @@ import {
   Button,
   Box,
   Paper,
+  Skeleton,
 } from '@mui/material';
 import {
   CloudUploadOutlined,
   SearchOutlined,
   DescriptionOutlined,
   TrendingUpOutlined,
+  StorageOutlined,
+  BusinessOutlined,
 } from '@mui/icons-material';
 import Layout from '../components/Layout';
 import { useAuth } from '../contexts/AuthContext';
+import { apiClient } from '../services/api';
 
 export default function Dashboard() {
   const navigate = useNavigate();
   const { user } = useAuth();
+  const [stats, setStats] = useState({
+    totalProducts: 0,
+    totalDocuments: 0,
+    totalVendors: 0,
+    totalOPZs: 0,
+  });
+  const [loadingStats, setLoadingStats] = useState(true);
+
+  useEffect(() => {
+    loadStatistics();
+  }, []);
+
+  const loadStatistics = async () => {
+    setLoadingStats(true);
+    try {
+      const data = await apiClient.getStatistics();
+      setStats(data);
+    } catch (error) {
+      // Stats already default to 0
+    } finally {
+      setLoadingStats(false);
+    }
+  };
 
   const modeCards = [
     {
@@ -74,25 +102,32 @@ export default function Dashboard() {
         {/* Statistics Overview */}
         <Grid container spacing={3} sx={{ mb: 4 }}>
           {[
-            { label: 'Total Products', value: '0', icon: <TrendingUpOutlined /> },
-            { label: 'Documents', value: '0', icon: <CloudUploadOutlined /> },
-            { label: 'Searches', value: '0', icon: <SearchOutlined /> },
-            { label: 'OPZ Created', value: '0', icon: <DescriptionOutlined /> },
+            { label: 'Products', value: stats.totalProducts, icon: <TrendingUpOutlined />, color: 'primary.main' },
+            { label: 'Documents', value: stats.totalDocuments, icon: <StorageOutlined />, color: 'success.main' },
+            { label: 'Vendors', value: stats.totalVendors, icon: <BusinessOutlined />, color: 'warning.main' },
+            { label: 'OPZ Created', value: stats.totalOPZs, icon: <DescriptionOutlined />, color: 'info.main' },
           ].map((stat, index) => (
             <Grid item xs={12} sm={6} md={3} key={index}>
               <Card>
                 <CardContent>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                    <Box sx={{ color: 'primary.main' }}>{stat.icon}</Box>
+                  {loadingStats ? (
                     <Box>
-                      <Typography variant="h5" fontWeight="bold">
-                        {stat.value}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        {stat.label}
-                      </Typography>
+                      <Skeleton variant="text" width="60%" height={40} />
+                      <Skeleton variant="text" width="80%" />
                     </Box>
-                  </Box>
+                  ) : (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                      <Box sx={{ color: stat.color }}>{stat.icon}</Box>
+                      <Box>
+                        <Typography variant="h5" fontWeight="bold">
+                          {stat.value}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          {stat.label}
+                        </Typography>
+                      </Box>
+                    </Box>
+                  )}
                 </CardContent>
               </Card>
             </Grid>

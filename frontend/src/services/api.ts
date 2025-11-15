@@ -128,15 +128,10 @@ class ApiClient {
     formData.append('product_id', productId.toString());
     formData.append('document_type', documentType);
 
-    try {
-      const response = await this.client.post('/api/import/documents/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Error in uploadDocuments:', error);
-      throw error;
-    }
+    const response = await this.client.post('/api/import/documents/upload', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
   }
 
   async getDocument(documentId: number) {
@@ -254,6 +249,32 @@ class ApiClient {
   async deleteOPZ(opzId: number) {
     const response = await this.client.delete(`/api/opz/${opzId}`);
     return response.data;
+  }
+
+  // Statistics
+  async getStatistics() {
+    try {
+      const [products, documents, vendors, opzs] = await Promise.all([
+        this.getProducts(),
+        this.getDocuments(),
+        this.getVendors(),
+        this.listUserOPZs(),
+      ]);
+
+      return {
+        totalProducts: products.length || 0,
+        totalDocuments: documents.length || 0,
+        totalVendors: vendors.length || 0,
+        totalOPZs: opzs.length || 0,
+      };
+    } catch (error) {
+      return {
+        totalProducts: 0,
+        totalDocuments: 0,
+        totalVendors: 0,
+        totalOPZs: 0,
+      };
+    }
   }
 }
 

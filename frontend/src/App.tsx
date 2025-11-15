@@ -14,6 +14,9 @@ import OPZCreation from './pages/OPZCreation';
 import Profile from './pages/Profile';
 import KnowledgeBrowser from './pages/KnowledgeBrowser';
 
+// Components
+import LoadingSpinner from './components/LoadingSpinner';
+
 // Theme
 const theme = createTheme({
   palette: {
@@ -37,7 +40,7 @@ const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { user, loading } = useAuth();
 
   if (loading) {
-    return <div>Loading...</div>;
+    return <LoadingSpinner message="Authenticating..." />;
   }
 
   if (!user) {

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Card,
@@ -45,6 +45,7 @@ export default function OPZCreation() {
   const [vendors, setVendors] = useState<any[]>([]);
   const [myOPZs, setMyOPZs] = useState<any[]>([]);
   const { enqueueSnackbar } = useSnackbar();
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Form state
   const [title, setTitle] = useState('');
@@ -64,6 +65,13 @@ export default function OPZCreation() {
   useEffect(() => {
     loadVendors();
     loadMyOPZs();
+
+    // Cleanup polling interval on unmount
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
   }, []);
 
   const loadVendors = async () => {
@@ -113,23 +121,37 @@ export default function OPZCreation() {
       setGeneratedOPZ(result);
       enqueueSnackbar('OPZ generation started', { variant: 'success' });
 
+      // Clear any existing polling interval
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+
       // Start polling for completion
-      const interval = setInterval(async () => {
+      pollingIntervalRef.current = setInterval(async () => {
         try {
           const opzData = await apiClient.getOPZ(result.opz_id);
           if (opzData.status === 'generated') {
-            clearInterval(interval);
+            if (pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current);
+              pollingIntervalRef.current = null;
+            }
             setGeneratedOPZ(opzData);
             setGenerating(false);
             enqueueSnackbar('OPZ generated successfully!', { variant: 'success' });
             loadMyOPZs();
           } else if (opzData.status === 'error') {
-            clearInterval(interval);
+            if (pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current);
+              pollingIntervalRef.current = null;
+            }
             setGenerating(false);
             enqueueSnackbar('OPZ generation failed', { variant: 'error' });
           }
         } catch (error) {
-          clearInterval(interval);
+          if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current);
+            pollingIntervalRef.current = null;
+          }
           setGenerating(false);
         }
       }, 3000);

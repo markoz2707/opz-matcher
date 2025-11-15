@@ -253,7 +253,10 @@ Serwer rack 2U z następującymi parametrami:
                           <List dense>
                             {product.deviations.map((dev, i) => (
                               <ListItem key={i}>
-                                <ListItemText primary={`✗ ${JSON.stringify(dev)}`} />
+                                <ListItemText
+                                  primary={typeof dev === 'string' ? dev : (dev.requirement || dev.description || 'Specification mismatch')}
+                                  secondary={typeof dev === 'object' && dev.details ? dev.details : null}
+                                />
                               </ListItem>
                             ))}
                           </List>
@@ -265,13 +268,17 @@ Serwer rack 2U z następującymi parametrami:
                     {product.adjustable_requirements.length > 0 && (
                       <Grid item xs={12} md={6}>
                         <Paper sx={{ p: 2, bgcolor: 'info.50' }}>
-                          <Typography variant="subtitle2" fontWeight="bold" gutterBottom>
-                            Adjustable Requirements
+                          <Typography variant="subtitle2" fontWeight="bold" gutterBottom sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <InfoOutlined color="info" fontSize="small" />
+                            Suggested Adjustments
                           </Typography>
                           <List dense>
                             {product.adjustable_requirements.map((req, i) => (
                               <ListItem key={i}>
-                                <ListItemText primary={JSON.stringify(req)} />
+                                <ListItemText
+                                  primary={typeof req === 'string' ? req : (req.suggestion || req.requirement || 'Consider adjusting requirement')}
+                                  secondary={typeof req === 'object' && req.reason ? `Reason: ${req.reason}` : null}
+                                />
                               </ListItem>
                             ))}
                           </List>
